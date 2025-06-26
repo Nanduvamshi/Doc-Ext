@@ -1,0 +1,8 @@
+fastapi
+boto3
+uvicorn
+python-multipart
+pydantic
+pandas
+httpx
+os

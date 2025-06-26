@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS Textract Document Parser</title>
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+        }
+        /* Custom styles for better table borders */
+        .result-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        .result-table th, .result-table td {
+            border: 1px solid #e2e8f0; /* Tailwind border-gray-200 */
+            padding: 0.75rem;
+            text-align: left;
+        }
+        .result-table th {
+            background-color: #f8fafc; /* Tailwind bg-gray-50 */
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-4xl border border-gray-200">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">Document Parser with AWS Textract</h1>
+
+        <div class="mb-6 border-2 border-dashed border-gray-300 rounded-lg p-6
+                    text-center bg-gray-50 hover:bg-gray-100 transition duration-200"
+             id="drop-area">
+            <p class="text-gray-600 mb-2">Drag & drop your document here, or</p>
+            <input type="file" id="document-input" accept="image/*,application/pdf" class="hidden">
+            <label for="document-input" class="inline-block bg-blue-600 text-white px-6 py-2
+                                            rounded-md cursor-pointer hover:bg-blue-700 transition duration-200 shadow-md">
+                Browse Files
+            </label>
+            <p id="file-name" class="text-sm text-gray-500 mt-2">No file chosen</p>
+        </div>
+
+        <button id="upload-button"
+                class="w-full bg-green-600 text-white py-3 rounded-md font-semibold text-lg
+                       hover:bg-green-700 transition duration-200 shadow-lg"
+                disabled>
+            Upload and Parse
+        </button>
+
+        <div id="loading-indicator" class="hidden mt-6 p-4 bg-blue-100 text-blue-800 rounded-md text-center">
+            Processing document with AWS Textract... Please wait.
+        </div>
+        
+        <!-- Timer display will go here -->
+        <div id="processing-time-display" class="hidden mt-4 p-2 bg-gray-100 text-gray-700 rounded-md text-center text-sm"></div>
+
+        <div id="error-message" class="hidden mt-6 p-4 bg-red-100 text-red-800 rounded-md text-center">
+            <!-- Error messages will be displayed here -->
+        </div>
+
+        <div id="results-container" class="mt-8 hidden">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Extracted Results</h2>
+
+            <!-- New Download CSV button -->
+            <button id="download-csv-button"
+                    class="w-full bg-indigo-600 text-white py-2 rounded-md font-semibold text-md
+                           hover:bg-indigo-700 transition duration-200 shadow-md mb-6 hidden">
+                Download CSV
+            </button>
+
+            <div id="extracted-text-section" class="mb-6">
+                <h3 class="text-xl font-medium text-gray-700 mb-2">Plain Text:</h3>
+                <pre id="extracted-text" class="bg-gray-50 p-4 rounded-md text-sm text-gray-800
+                                               whitespace-pre-wrap break-words border border-gray-200 max-h-96 overflow-auto"></pre>
+            </div>
+
+            <div id="tables-section" class="mb-6 hidden">
+                <h3 class="text-xl font-medium text-gray-700 mb-2">Tables:</h3>
+                <div id="tables-output" class="space-y-4">
+                    <!-- Tables will be rendered here -->
+                </div>
+            </div>
+
+            <div id="forms-section" class="mb-6 hidden">
+                <h3 class="text-xl font-medium text-gray-700 mb-2">Key-Value Pairs (Forms):</h3>
+                <dl id="forms-output" class="bg-gray-50 p-4 rounded-md border border-gray-200
+                                            grid grid-cols-2 gap-x-6 gap-y-2">
+                    <!-- Forms will be rendered here -->
+                </dl>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const documentInput = document.getElementById('document-input');
+        const fileNameSpan = document.getElementById('file-name');
+        const uploadButton = document.getElementById('upload-button');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const processingTimeDisplay = document.getElementById('processing-time-display');
+        const errorMessageDiv = document.getElementById('error-message');
+        const resultsContainer = document.getElementById('results-container');
+        const downloadCsvButton = document.getElementById('download-csv-button');
+        const extractedTextPre = document.getElementById('extracted-text');
+        const tablesSection = document.getElementById('tables-section');
+        const tablesOutputDiv = document.getElementById('tables-output');
+        const formsSection = document.getElementById('forms-section');
+        const formsOutputDl = document.getElementById('forms-output');
+        const dropArea = document.getElementById('drop-area');
+
+        let selectedFile = null;
+        let startTime = 0;
+        let lastExtractedText = null; // Store just extracted_text for backend call
+        let lastExtractedForms = null; // Store just forms for backend call
+
+        // --- Event Listeners ---
+
+        documentInput.addEventListener('change', (event) => {
+            selectedFile = event.target.files[0];
+            if (selectedFile) {
+                fileNameSpan.textContent = selectedFile.name;
+                uploadButton.disabled = false;
+            } else {
+                fileNameSpan.textContent = 'No file chosen';
+                uploadButton.disabled = true;
+            }
+            hideResultsAndErrors();
+        });
+
+        uploadButton.addEventListener('click', uploadDocument);
+        
+        // Updated CSV download button event listener
+        downloadCsvButton.addEventListener('click', async () => {
+            if (!lastExtractedText || !lastExtractedForms) {
+                console.warn("No raw Textract data available to send for CSV generation.");
+                displayError("Please upload a document first to enable CSV download.");
+                return;
+            }
+
+            processingTimeDisplay.textContent = "Generating CSV...";
+            processingTimeDisplay.classList.remove('hidden');
+            downloadCsvButton.disabled = true;
+
+            try {
+                // Call the backend's /download-csv/ endpoint directly
+                const response = await fetch('http://127.0.0.1:8000/download-csv/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        extracted_text: lastExtractedText,
+                        forms: lastExtractedForms
+                    }),
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob(); // Get the response as a Blob
+                    const disposition = response.headers.get('Content-Disposition');
+                    let filename = 'extracted_document_data.csv';
+                    if (disposition && disposition.indexOf('attachment') !== -1) {
+                        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+                        const matches = filenameRegex.exec(disposition);
+                        if (matches != null && matches[1]) {
+                            filename = matches[1].replace(/['"]/g, '');
+                        }
+                    }
+
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(link.href);
+
+                    processingTimeDisplay.textContent = "CSV generated and downloaded!";
+                } else {
+                    const errorData = await response.json(); // Assuming backend sends JSON for errors
+                    displayError(errorData.detail || 'An error occurred during CSV generation on the server.');
+                }
+            } catch (error) {
+                console.error('Error initiating CSV download:', error);
+                displayError('Failed to connect to the server or an unexpected error occurred during CSV download.');
+            } finally {
+                downloadCsvButton.disabled = false;
+            }
+        });
+
+
+        // Drag and Drop functionality
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+        });
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, unhighlight, false);
+        });
+
+        dropArea.addEventListener('drop', handleDrop, false);
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        function highlight() {
+            dropArea.classList.add('border-blue-500', 'bg-blue-50');
+        }
+
+        function unhighlight() {
+            dropArea.classList.remove('border-blue-500', 'bg-blue-50');
+        }
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                selectedFile = files[0];
+                if (selectedFile.type.startsWith('image/') || selectedFile.type === 'application/pdf') {
+                    documentInput.files = files; // Update the file input element
+                    fileNameSpan.textContent = selectedFile.name;
+                    uploadButton.disabled = false;
+                    hideResultsAndErrors();
+                } else {
+                    displayError('Unsupported file type. Please upload an image or PDF.');
+                    selectedFile = null;
+                    fileNameSpan.textContent = 'No file chosen';
+                    uploadButton.disabled = true;
+                }
+            }
+        }
+
+
+        // --- Core Logic ---
+
+        async function uploadDocument() {
+            if (!selectedFile) {
+                displayError('Please select a document to upload.');
+                return;
+            }
+
+            // Reset UI state
+            hideResultsAndErrors();
+            loadingIndicator.classList.remove('hidden');
+            startTime = performance.now(); // Start the timer
+            uploadButton.disabled = true;
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            try {
+                // IMPORTANT: Ensure this URL matches your FastAPI backend address and port
+                const response = await fetch('http://127.0.0.1:8000/upload-document/', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    lastExtractedText = data.extracted_text; // Store raw text
+                    lastExtractedForms = data.forms;         // Store raw forms
+                    console.log("Raw Extracted Data from Textract (for display and further parsing):", data);
+                    displayResults(data);
+                } else {
+                    displayError(data.detail || 'An unknown error occurred during processing.');
+                }
+            } catch (error) {
+                console.error('Error uploading document:', error);
+                displayError('Failed to connect to the server or an unexpected error occurred. Check console for details.');
+            } finally {
+                loadingIndicator.classList.add('hidden');
+                uploadButton.disabled = false;
+            }
+        }
+
+        function displayResults(data) {
+            resultsContainer.classList.remove('hidden');
+
+            const endTime = performance.now();
+            const elapsedTime = ((endTime - startTime) / 1000).toFixed(2); // Calculate time in seconds
+
+            processingTimeDisplay.textContent = `Textract processing completed in ${elapsedTime} seconds.`;
+            processingTimeDisplay.classList.remove('hidden');
+
+            // Show download CSV button
+            downloadCsvButton.classList.remove('hidden');
+
+            // Display extracted text
+            extractedTextPre.textContent = data.extracted_text || 'No plain text extracted.';
+
+            // Display tables
+            tablesOutputDiv.innerHTML = ''; // Clear previous tables
+            if (data.tables && data.tables.length > 0) {
+                tablesSection.classList.remove('hidden');
+                data.tables.forEach((table, index) => {
+                    const tableHtml = document.createElement('table');
+                    tableHtml.classList.add('result-table', 'shadow-sm', 'rounded-md', 'overflow-hidden'); // Add styling
+                    tableHtml.innerHTML = ''; // Clear existing content
+
+                    if (table.length > 0) {
+                        const tbody = document.createElement('tbody');
+                        const thead = document.createElement('thead');
+                        
+                        // Heuristic: If first row has fewer empty cells than subsequent rows, treat it as header
+                        const isFirstRowHeader = table.length > 1 && table[0].filter(cell => cell.trim() === '').length < table[1].filter(cell => cell.trim() === '').length;
+
+                        // Create header (thead)
+                        if (isFirstRowHeader) {
+                            const trHead = document.createElement('tr');
+                            table[0].forEach(headerText => {
+                                const th = document.createElement('th');
+                                th.textContent = headerText;
+                                trHead.appendChild(th);
+                            });
+                            thead.appendChild(trHead);
+                            tableHtml.appendChild(thead);
+                        }
+
+
+                        // Create body (tbody) starting from the relevant row
+                        for (let i = (isFirstRowHeader ? 1 : 0); i < table.length; i++) {
+                            const row = table[i];
+                            const trBody = document.createElement('tr');
+                            row.forEach(cellText => {
+                                const td = document.createElement('td');
+                                td.textContent = cellText;
+                                trBody.appendChild(td);
+                            });
+                            tbody.appendChild(trBody);
+                        }
+                        tableHtml.appendChild(tbody);
+                    }
+                    tablesOutputDiv.appendChild(tableHtml);
+                });
+            } else {
+                tablesSection.classList.add('hidden');
+            }
+
+            // Display forms (key-value pairs)
+            formsOutputDl.innerHTML = ''; // Clear previous forms
+            if (data.forms && data.forms.length > 0) {
+                formsSection.classList.remove('hidden');
+                data.forms.forEach(form => {
+                    const dt = document.createElement('dt');
+                    dt.classList.add('font-medium', 'text-gray-600');
+                    dt.textContent = form.key + ':';
+                    
+                    const dd = document.createElement('dd');
+                    dd.classList.add('text-gray-800');
+                    dd.textContent = form.value;
+
+                    formsOutputDl.appendChild(dt);
+                    formsOutputDl.appendChild(dd);
+                });
+            } else {
+                formsSection.classList.add('hidden');
+            }
+        }
+
+        function displayError(message) {
+            errorMessageDiv.classList.remove('hidden');
+            errorMessageDiv.textContent = `Error: ${message}`;
+            resultsContainer.classList.add('hidden');
+            processingTimeDisplay.classList.add('hidden');
+            downloadCsvButton.classList.add('hidden');
+        }
+
+        function hideResultsAndErrors() {
+            errorMessageDiv.classList.add('hidden');
+            resultsContainer.classList.add('hidden');
+            loadingIndicator.classList.add('hidden');
+            processingTimeDisplay.classList.add('hidden');
+            processingTimeDisplay.textContent = '';
+            downloadCsvButton.classList.add('hidden');
+            downloadCsvButton.disabled = false; // Reset button state
+            lastExtractedText = null;
+            lastExtractedForms = null;
+        }
+    </script>
+</body>
+</html>
