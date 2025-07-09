@@ -1,8 +1,9 @@
 import boto3
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles # Import StaticFiles
 from pydantic import BaseModel
 import io
 import time
@@ -24,7 +25,7 @@ AWS_REGION = 'us-east-1' # Change to your desired AWS region
 # --- Gemini API Configuration ---
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 # API key is left as an empty string; Canvas will provide it at runtime.
-GEMINI_API_KEY = "AIzaSyAedmC_y_dfv9FgF3p0NKwx0MR8zUWarM0" 
+GEMINI_API_KEY = "AIzaSyAedmC_y_dfv9FgF3p0NKwx0MR8zUWarM0"
 
 # --- Initialize AWS Clients ---
 textract_client = boto3.client('textract', region_name=AWS_REGION)
@@ -43,6 +44,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Mount Static Files Directory ---
+# This tells FastAPI to serve files from the "static" directory.
+# Ensure your index.html is inside a folder named 'static' next to main.py
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 class DocumentParseRequest(BaseModel):
     extracted_text: str
@@ -963,35 +969,20 @@ def detect_document_type(text):
 async def call_gemini_for_name_extraction(extracted_text: str):
     """
     Calls the Gemini API to extract the person's name from the extracted text.
+    This function now expects a pre-filtered text containing primarily plausible name candidates.
     """
     prompt_text = f"""
-You are an expert document parser. Your task is to identify the full name of a person or entity from the provided extracted text.
+You are an expert document parser. Your task is to identify the full name of a person or entity from the provided text.
+This text has already been pre-filtered to remove most non-name lines and noise.
 
-Here are the primary rules and hints for name identification:
-1.  **For PAN cards (if "Income tax department" is present):**
-    * Look for explicit name labels such as `नाम/Name`, `/Name`, `ATH/Name`, `TTA/ Name`.
-    * The name itself will typically appear on the same line as the label (after a colon or space), or within the **next 3-4 lines** following the label.
-    * When searching for the name after the label, you *must* **skip and ignore any lines that are obviously not names**. Examples of lines to skip include:
-        * Lines containing only numbers or short alphanumeric codes (e.g., '21-17', '137453117', 'CYMPB5839A', 'LUW-REGD-183352').
-        * Very short, single-word lines that are not typical names (e.g., 'ART', 'mining', 'and aria', 'Rent del HOU this').
-        * Lines that are part of other structured data (like dates or addresses).
-    * Once you encounter a line that is a **plausible name candidate** (primarily alphabetic, properly capitalized, not a number or code, and looks like a person's or company's name), extract that as the name. Consider names that are entirely in uppercase as plausible, especially for company names.
+Based on the content below, identify the single most prominent and plausible human or entity name.
+Prioritize capitalized words or phrases that clearly represent a name.
 
-2.  **For Aadhar cards (if "Unique Identification Authority" or "Government of India" is present):**
-    * **Identify the most prominent human name.** This name is typically found on the **first few lines (lines 1-5)** of the extracted text.
-    * **Crucially, ignore any lines that are clearly not names, even if they appear early.** Examples of lines to ignore include:
-        * OCR noise like "STREET HEAR", "OFFSITE", "STRET".
-        * Phrases like "Floof Par" or "ART , 46210".
-        * Any lines containing numbers or looking like non-name headers.
-    * The name is often located immediately above the "DOB", "Date", or "Date of birth" labels, or directly above a date pattern (e.g., DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY).
-    * The extracted name must be a plausible human name (primarily alphabetic, properly capitalized, e.g., "Bharat Sharma", "Ankush Tandon"). It should NOT contain numbers or unrelated special characters.
+If you find multiple plausible names, choose the one that appears most like a primary personal or business name.
 
-3.  **General Name Characteristics (Applies to all documents, if specific rules don't apply):** A valid name should be a standalone entity. It should primarily consist of alphabetic characters, spaces, periods, commas, hyphens, or apostrophes. It must NOT contain numbers or other special characters (like '#', '@', '$', ':', '(', ')'), unless it's part of a company name where numbers might be present (e.g., "Pvt. Ltd. 123"). Prioritize human names for Aadhar, and personal/company names for PAN cards based on context.
-
-Based on these precise rules, analyze the following extracted document text and identify the full, uncleaned name of the person or entity. Prioritize the name found according to rule 1 or 2.
 Return only the identified name as a JSON object with a single key "name". If no name is found that strictly adheres to these rules, return "Not Found".
 
-Extracted Text:
+Pre-filtered Text:
 ---
 {extracted_text}
 ---
@@ -1002,7 +993,7 @@ Expected JSON Output Format:
   "name": "Extracted Name"
 }}
 ```
-Or, if not found (strictly based on rules):
+Or, if not found:
 ```json
 {{
   "name": "Not Found"
@@ -1096,10 +1087,33 @@ async def _process_document_for_extraction(extracted_text: str, forms: list):
     extracted_fields['Document type'] = doc_category
     print(f"  [Core Extraction] Detected Document Type: '{extracted_fields['Document type']}'")
 
-    # Use Gemini for name extraction (now the sole method for name)
-    extracted_name_from_gemini = await call_gemini_for_name_extraction(extracted_text)
+    # --- Pre-filter lines to send to Gemini for name extraction ---
+    plausible_name_lines = []
+    # Limit the number of lines to scan for name for efficiency and relevance
+    # Name is typically found in the first few lines, up to ~15.
+    lines_to_scan_for_name = lines[:15] 
+
+    print("\n--- Pre-filtering lines for Name Extraction ---")
+    for line in lines_to_scan_for_name:
+        # Use allow_all_caps_as_name=True here for a broader initial filter.
+        # Gemini will then use its specific rules for Aadhar/PAN capitalization.
+        if is_plausible_name_line(line, allow_all_caps_as_name=True):
+            plausible_name_lines.append(line)
+            print(f"    [Pre-filter] Kept line for name consideration: '{line}'")
+        else:
+            print(f"    [Pre-filter] Discarded line for name consideration: '{line}'")
+
+    # Join the plausible lines. If no lines remain, send the original text as a fallback
+    # to give Gemini a chance to extract something, even if it's noisy.
+    cleaned_text_for_gemini = "\n".join(plausible_name_lines)
+    if not cleaned_text_for_gemini:
+        print("    [Pre-filter] No plausible name lines found after filtering. Sending original text to Gemini as fallback.")
+        cleaned_text_for_gemini = extracted_text 
+
+    # Use Gemini for name extraction with the pre-filtered text
+    extracted_name_from_gemini = await call_gemini_for_name_extraction(cleaned_text_for_gemini)
     extracted_fields['Name'] = extracted_name_from_gemini if extracted_name_from_gemini != "Not Found" else ""
-    print(f"  [Core Extraction] Final Name (from Gemini): '{extracted_fields['Name']}'")
+    print(f"  [Core Extraction] Final Name (from Gemini after pre-filter): '{extracted_fields['Name']}'")
 
     print(f"\n--- Starting Other Entity Extraction ---")
 
@@ -1321,13 +1335,13 @@ async def _process_document_for_extraction(extracted_text: str, forms: list):
 
 # --- FastAPI Endpoints ---
 
-# New GET endpoint for the root URL
+# Serve index.html at the root URL
 @app.get("/")
 async def read_root():
     """
-    Returns a simple message indicating the API is running.
+    Serves the index.html file from the static directory.
     """
-    return JSONResponse(content={"message": "AWS Textract Document Parser API is running!"})
+    return FileResponse("static/index.html")
 
 @app.post("/parse-document-data/")
 async def parse_document_data(request_data: DocumentParseRequest):
