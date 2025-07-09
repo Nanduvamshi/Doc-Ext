@@ -115,6 +115,9 @@
         let lastExtractedText = null; // Store just extracted_text for backend call
         let lastExtractedForms = null; // Store just forms for backend call
 
+        // Dynamically get the base URL from the current window location
+        const backendBaseUrl = window.location.origin;
+
         // --- Event Listeners ---
 
         documentInput.addEventListener('change', (event) => {
@@ -144,8 +147,8 @@
             downloadCsvButton.disabled = true;
 
             try {
-                // Call the backend's /download-csv/ endpoint directly
-                const response = await fetch('http://127.0.0.1:8000/download-csv/', {
+                // Call the backend's /download-csv/ endpoint directly using the dynamic base URL
+                const response = await fetch(backendBaseUrl + '/download-csv/', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -256,22 +259,23 @@
             formData.append('file', selectedFile);
 
             try {
-                // IMPORTANT: Ensure this URL matches your FastAPI backend address and port
-                const response = await fetch('http://127.0.0.1:8000/upload-document/', {
+                // Use the dynamic backendBaseUrl for the upload endpoint
+                const response = await fetch(backendBaseUrl + '/upload-document/', {
                     method: 'POST',
                     body: formData,
                 });
 
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
                 const data = await response.json();
 
-                if (response.ok) {
-                    lastExtractedText = data.extracted_text; // Store raw text
-                    lastExtractedForms = data.forms;         // Store raw forms
-                    console.log("Raw Extracted Data from Textract (for display and further parsing):", data);
-                    displayResults(data);
-                } else {
-                    displayError(data.detail || 'An unknown error occurred during processing.');
-                }
+                lastExtractedText = data.extracted_text; // Store raw text
+                lastExtractedForms = data.forms;         // Store raw forms
+                console.log("Raw Extracted Data from Textract (for display and further parsing):", data);
+                displayResults(data);
+                
             } catch (error) {
                 console.error('Error uploading document:', error);
                 displayError('Failed to connect to the server or an unexpected error occurred. Check console for details.');
