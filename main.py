@@ -25,7 +25,7 @@ AWS_REGION = 'us-east-1' # Change to your desired AWS region
 # --- Gemini API Configuration ---
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 # API key is left as an empty string; Canvas will provide it at runtime.
-GEMINI_API_KEY = "AIzaSyAedmC_y_dfv9FgF3p0NKwx0MR8zUWarM0"
+GEMINI_API_KEY = "YOUR-API-KEY"
 
 # --- Initialize AWS Clients ---
 textract_client = boto3.client('textract', region_name=AWS_REGION)
